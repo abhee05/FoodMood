@@ -82,28 +82,66 @@ function App() {
     setMatches(nextMatches);
   }, [session?.roundId]);
 
-  useEffect(() => {
+    useEffect(() => {
     if (!session || (screen !== 'waiting' && screen !== 'wait' && screen !== 'reveal' && screen !== 'chosen')) return;
+
     let active = true;
+
     const poll = async () => {
       try {
+        const previousRoundNumber = session.roundNumber;
         const nextSession = await refreshSession();
+
         if (!active) return;
+
+        // If the other participant started a new round,
+        // automatically move this participant into the new round.
+        if (nextSession.roundNumber > previousRoundNumber) {
+          setPosition(0);
+          setMyReactions({});
+          setMatches([]);
+          setSelectedFood(null);
+          setError('');
+          setScreen('rating');
+          return;
+        }
+
         if (nextSession.finalFoodOptionId) {
           setScreen('chosen');
         } else if (nextSession.bothFinished && screen === 'wait') {
           await revealMatches();
-          if (active) setScreen('reveal');
+
+          if (active) {
+            setError('');
+            setScreen('reveal');
+          }
         }
       } catch {
-        if (active && screen === 'wait') setError('Still waiting for the other participant. We will keep checking.');
+        if (active && screen === 'wait') {
+          setError(
+            'Still waiting for the other participant. We will keep checking.'
+          );
+        }
       }
     };
-    void poll();
-    const interval = window.setInterval(() => { void poll(); }, 2000);
-    return () => { active = false; window.clearInterval(interval); };
-  }, [refreshSession, revealMatches, screen, session?.sessionId]);
 
+    void poll();
+
+    const interval = window.setInterval(() => {
+      void poll();
+    }, 2000);
+
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [
+    refreshSession,
+    revealMatches,
+    screen,
+    session?.sessionId,
+    session?.roundNumber,
+  ]);
   const startCreate = async () => {
     if (!authReady) return;
     setBusy(true); setError('');
