@@ -63,23 +63,24 @@ function App() {
   }, []);
 
   const refreshSession = useCallback(async (): Promise<FoodMoodState> => {
-    const nextSession = normalizeState(await getFoodMoodSessionState());
+    const nextSession = await getFoodMoodSessionState(session!.sessionId);
     setSession(nextSession);
     if (nextSession.finalFoodOptionId) {
       const finalFood = foods.find((food) => food.id === nextSession.finalFoodOptionId) ?? null;
       setSelectedFood(finalFood);
     }
     return nextSession;
-  }, []);
+  }, [session?.sessionId]);
 
   const revealMatches = useCallback(async (): Promise<void> => {
-    const backendMatches = await getFoodMoodMatches();
+    if (!session) return;
+    const backendMatches = await getFoodMoodMatches(session.roundId);
     const nextMatches = backendMatches.map((match) => {
       const food = foods.find((option) => option.id === match.foodOptionId);
       return food ? { ...food, tier: match.tier } : null;
     }).filter((match): match is Match => match !== null);
     setMatches(nextMatches);
-  }, []);
+  }, [session?.roundId]);
 
   useEffect(() => {
     if (!session || (screen !== 'waiting' && screen !== 'wait' && screen !== 'reveal' && screen !== 'chosen')) return;
@@ -149,7 +150,8 @@ function App() {
   const selectFood = async (food: FoodOption) => {
     setBusy(true); setError('');
     try {
-      await selectFinalFoodMood(food.id);
+      if (!session) return;
+      await selectFinalFoodMood(session.roundId, food.id);
       setSelectedFood(food);
       const nextSession = await refreshSession();
       if (nextSession.finalFoodOptionId) setScreen('chosen');
@@ -169,7 +171,7 @@ function App() {
     const previousRound = session.roundNumber;
     setBusy(true); setError('');
     try {
-      const nextRound = await startAnotherFoodMoodRound();
+      const nextRound = await startAnotherFoodMoodRound(session.sessionId);
       setSession(nextRound); setPosition(0); setMyReactions({}); setMatches([]); setSelectedFood(null); setScreen('rating');
     } catch (failure: unknown) {
       try {
