@@ -81,6 +81,18 @@ export function normalizeState(data: unknown): FoodMoodState {
   const participant = nestedRecord(root, 'participant');
   const round = nestedRecord(root, 'round');
 
+  const participantCount = numberValue(
+    root.participant_count,
+    root.participantCount
+  );
+
+  const participantSeat = numberValue(
+    root.my_seat,
+    root.participant_seat,
+    root.participantSeat,
+    participant.seat
+  );
+
   return {
     sessionId: stringValue(
       root.session_id,
@@ -95,6 +107,7 @@ export function normalizeState(data: unknown): FoodMoodState {
     ),
 
     participantId: stringValue(
+      root.my_participant_id,
       root.participant_id,
       root.participantId,
       participant.id
@@ -106,17 +119,15 @@ export function normalizeState(data: unknown): FoodMoodState {
       participant.display_name
     ),
 
-    participantSeat: numberValue(
-      root.participant_seat,
-      root.participantSeat,
-      participant.seat
-    ),
+    participantSeat,
 
-    partnerJoined: booleanValue(
-      root.partner_joined,
-      root.partnerJoined,
-      root.session_full
-    ),
+    partnerJoined:
+      participantCount >= 2 ||
+      booleanValue(
+        root.partner_joined,
+        root.partnerJoined,
+        root.session_full
+      ),
 
     bothFinished: booleanValue(
       root.both_finished,
@@ -125,6 +136,7 @@ export function normalizeState(data: unknown): FoodMoodState {
     ),
 
     roundId: stringValue(
+      root.current_round_id,
       root.round_id,
       root.roundId,
       round.id
