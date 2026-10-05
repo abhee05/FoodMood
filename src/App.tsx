@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft, ArrowRight, Check, CheckCircle2, ChevronRight, Clipboard, Clock3, Copy,
-  Flame, Heart, LockKeyhole, MessageCircle, RotateCcw, Share2, Sparkles, Users, Utensils, X,
+  Flame, Heart, LockKeyhole, RotateCcw, Sparkles, Users, Utensils, X,
 } from 'lucide-react';
 import {
   authenticateAnonymously, createFoodMoodSession, getFoodMoodMatches, getFoodMoodSessionState,
@@ -9,10 +9,9 @@ import {
   proposeFoodMood, rejectFoodMoodProposal, startAnotherFoodMoodRound, submitFoodMoodReactions,
   type FoodMoodMatch, type FoodMoodRoundStart, type FoodMoodState, type Reaction,
 } from '@/lib/foodmood-api';
+import { buildJoinUrl, copyJoinCode } from '@/lib/share';
 import {
-  buildJoinUrl, copyJoinCode, shareInviteLink,
-} from '@/lib/share';
-import {
+  formatDecidedBy, groupMatchesByTier, PARTNER_FALLBACK_NAME,
   resolveFlowOutcome, resolveProposalView, type ProposalView,
 } from '@/lib/session-flow';
 
@@ -27,7 +26,6 @@ const POLL_INTERVAL_MS = 2000;
 const LIVE_SCREENS: ReadonlySet<Screen> = new Set(['waiting', 'wait', 'reveal', 'chosen']);
 
 const ACTIVE_SESSION_KEY = 'foodmood:active-session';
-const PARTNER_FALLBACK_NAME = 'Your partner';
 
 const foods: FoodOption[] = [
   { id: 'pizza', name: 'Pizza', emoji: '🍕', description: 'Crispy, cheesy and always a good idea.', color: 'coral' },
@@ -116,6 +114,9 @@ function App() {
   const chosenFood = resolveFoodOption(selectedFoodId ?? session?.finalFoodOptionId ?? null);
   const isLiveScreen = LIVE_SCREENS.has(screen);
   const proposal = resolveProposalView(session);
+  const inviteUrl = buildJoinUrl(session?.joinCode ?? '');
+  // The raw partner name, so a pre-names session is distinguishable from the placeholder.
+  const decidedBy = formatDecidedBy(session?.participantName ?? myName, session?.partnerName);
 
   useEffect(() => { screenRef.current = screen; }, [screen]);
   useEffect(() => { sessionRef.current = session; }, [session]);
@@ -314,21 +315,6 @@ function App() {
   useEffect(() => () => {
     if (noticeTimerRef.current !== null) window.clearTimeout(noticeTimerRef.current);
   }, []);
-
-  /** Shares the invite link, falling back to a clipboard copy when needed. */
-  const shareInvite = useCallback(async () => {
-    const code = sessionRef.current?.joinCode;
-    if (!code) {
-      setError('Your invite link is not ready yet.');
-      return;
-    }
-
-    setError('');
-    const outcome = await shareInviteLink(buildJoinUrl(code), code);
-
-    if (outcome === 'copied') flashNotice('Invite link copied ✓');
-    else if (outcome === 'failed') setError('We could not share or copy the invite link.');
-  }, [flashNotice]);
 
   /** Copies just the session join code. */
   const copyCode = useCallback(async () => {
@@ -559,11 +545,11 @@ function App() {
       {waitingNotice && screen === 'wait' && <InlineError message={waitingNotice} />}
       {screen === 'home' && <HomeScreen name={displayName} setName={setDisplayName} nameError={nameError} onCreate={startCreate} onJoin={() => { setNameError(''); setError(''); setScreen('join'); }} disabled={!authReady || busy} />}
       {screen === 'join' && <JoinScreen name={displayName} setName={setDisplayName} nameError={nameError} code={joinCode} setCode={setJoinCode} error={error} onJoin={startJoin} onBack={() => { setError(''); setNameError(''); setScreen('home'); }} disabled={!authReady || busy} />}
-      {screen === 'waiting' && session && <WaitingScreen code={session.joinCode} name={myName || 'You'} partnerName={partnerName} partnerJoined={session.partnerJoined} onStart={beginRating} disabled={busy} onShare={() => void shareInvite()} onCopyCode={() => void copyCode()} notice={shareNotice} />}
+      {screen === 'waiting' && session && <WaitingScreen code={session.joinCode} inviteUrl={inviteUrl} name={myName || 'You'} partnerName={partnerName} partnerJoined={session.partnerJoined} onStart={beginRating} disabled={busy} onCopyCode={() => void copyCode()} notice={shareNotice} />}
       {screen === 'rating' && <RatingScreen round={roundNumber} position={position} food={currentFood} onChoose={chooseReaction} disabled={busy} />}
       {screen === 'wait' && <WaitingForPartner name={myName || 'there'} />}
       {screen === 'reveal' && <RevealScreen matches={matches} proposal={proposal} partnerName={partnerName} onPropose={proposeFood} onAccept={() => void acceptProposal()} onReject={() => void rejectProposal()} disabled={busy} onAnotherRound={startAnotherRound} />}
-      {screen === 'chosen' && chosenFood && <ChosenScreen food={chosenFood} round={roundNumber} onAnotherRound={startAnotherRound} disabled={busy} />}
+      {screen === 'chosen' && chosenFood && <ChosenScreen food={chosenFood} round={roundNumber} decidedBy={decidedBy} onAnotherRound={startAnotherRound} disabled={busy} />}
     </main>
     {screen !== 'rating' && screen !== 'home' && <FooterHint />}
   </div></div>;
@@ -580,26 +566,26 @@ function HomeScreen({ name, setName, nameError, onCreate, onJoin, disabled }: { 
 
 function JoinScreen({ name, setName, nameError, code, setCode, error, onJoin, onBack, disabled }: { name: string; setName: (value: string) => void; nameError: string; code: string; setCode: (value: string) => void; error: string; onJoin: () => void; onBack: () => void; disabled: boolean }) { return <div className="form-screen"><div className="eyebrow"><Users size={16} /> Join a FoodMood</div><h1>Bring your<br /><em>appetite.</em></h1><p className="screen-intro">Enter the secret code your person sent you. You’ll both rate the same 12 foods.</p><NameField id="join-name" value={name} setValue={setName} label="Your name" placeholder="e.g. Abhishek" error={nameError} /><label className="field-label" htmlFor="join-code">Session join code</label><div className="code-input-wrap"><Clipboard size={19} /><input id="join-code" value={code} onChange={(event) => setCode(event.target.value.toUpperCase())} placeholder="MOOD-48" maxLength={12} /></div>{error && <p className="error-message">{error}</p>}<button className="primary-button full" onClick={onJoin} disabled={disabled || !code.trim()}>Join FoodMood <ArrowRight size={19} /></button><button className="text-button" onClick={onBack}>I’d rather create one</button><div className="info-card"><LockKeyhole size={20} /><div><strong>Private by design</strong><span>Your choices stay hidden from your partner until you both finish.</span></div></div></div>; }
 
-function WaitingScreen({ code, name, partnerName, partnerJoined, onStart, disabled, onShare, onCopyCode, notice }: { code: string; name: string; partnerName: string; partnerJoined: boolean; onStart: () => void; disabled: boolean; onShare: () => void; onCopyCode: () => void; notice: string }) { return <div className="waiting-screen"><div className="eyebrow"><span className="live-dot" /> Lobby active · two-to-tango</div><section className="lobby-card"><div className="round-pill"><Flame size={16} /> Table for two</div><h1>Grab your partner<br />in dine</h1><p>Share this secret code to pair appetites and banish “I don’t know, whatever you want” forever.</p><span className="code-label">Session join code</span><div className="session-code"><span>{code}</span><button className="copy-button" aria-label="Copy session code" onClick={onCopyCode}><Copy size={20} /></button></div><button className="primary-button full" onClick={onShare}><Share2 size={19} /> Share invite link</button><div className="share-options"><span><MessageCircle size={16} /> Share link</span><button type="button" className="share-option-button" onClick={onCopyCode}><Copy size={16} /> Copy code</button></div>{notice && <p className="copy-feedback" role="status">{notice}</p>}</section><section className="status-card"><div className="section-heading"><h2>Dining duo status</h2><span className="seat-pill"><span /> {partnerJoined ? '2 of 2' : '1 of 2'} seated</span></div><div className="person-row"><div className="person-avatar coral-bg">{nameInitial(name)}</div><div className="person-info"><strong>You ({name})</strong><span className="ready-text"><CheckCircle2 size={15} /> Ready to choose</span></div><span className="ready-pill">READY</span></div><div className="person-row waiting-row"><div className="person-avatar waiting-avatar"><Users size={22} /></div><div className="person-info"><strong>{partnerJoined ? `${partnerName} is here` : `Waiting for ${partnerName}…`}</strong><span>{partnerJoined ? 'Your table is ready.' : 'Share this code so they can join.'}</span></div></div><button className="primary-button full start-button" onClick={onStart} disabled={!partnerJoined || disabled}><Utensils size={19} /> {partnerJoined ? 'Start rating' : 'Waiting for partner'}</button></section><div className="deck-preview"><div><span>Tonight’s deck preview</span><strong>12 options loaded</strong></div><div className="preview-chips">{foods.slice(0, 4).map((food) => <span key={food.id}>{food.emoji} {food.name}</span>)}</div></div></div>; }
+function WaitingScreen({ code, inviteUrl, name, partnerName, partnerJoined, onStart, disabled, onCopyCode, notice }: { code: string; inviteUrl: string; name: string; partnerName: string; partnerJoined: boolean; onStart: () => void; disabled: boolean; onCopyCode: () => void; notice: string }) { return <div className="waiting-screen"><div className="eyebrow"><span className="live-dot" /> Lobby active · two-to-tango</div><section className="lobby-card"><div className="round-pill"><Flame size={16} /> Table for two</div><h1>Grab your partner<br />in dine</h1><p>Share this secret code to pair appetites and banish “I don’t know, whatever you want” forever.</p><span className="code-label">Session join code</span><div className="session-code"><span>{code}</span><button className="copy-button" aria-label="Copy session code" onClick={onCopyCode}><Copy size={20} /></button></div><div className="invite-link"><span className="code-label invite-label">Or send this invite link</span><div className="invite-link-row"><span className="invite-url">{inviteUrl}</span><button type="button" className="copy-link-button" onClick={onCopyCode}><Copy size={16} /> Copy code</button></div></div>{notice && <p className="copy-feedback" role="status">{notice}</p>}</section><section className="status-card"><div className="section-heading"><h2>Dining duo status</h2><span className="seat-pill"><span /> {partnerJoined ? '2 of 2' : '1 of 2'} seated</span></div><div className="person-row"><div className="person-avatar coral-bg">{nameInitial(name)}</div><div className="person-info"><strong>You ({name})</strong><span className="ready-text"><CheckCircle2 size={15} /> Ready to choose</span></div><span className="ready-pill">READY</span></div><div className="person-row waiting-row"><div className="person-avatar waiting-avatar"><Users size={22} /></div><div className="person-info"><strong>{partnerJoined ? `${partnerName} is here` : `Waiting for ${partnerName}…`}</strong><span>{partnerJoined ? 'Your table is ready.' : 'Share this code so they can join.'}</span></div></div><button className="primary-button full start-button" onClick={onStart} disabled={!partnerJoined || disabled}><Utensils size={19} /> {partnerJoined ? 'Start rating' : 'Waiting for partner'}</button></section><div className="deck-preview"><div><span>Tonight’s deck preview</span><strong>12 options loaded</strong></div><div className="preview-chips">{foods.slice(0, 4).map((food) => <span key={food.id}>{food.emoji} {food.name}</span>)}</div></div></div>; }
 
 function RatingScreen({ round, position, food, onChoose, disabled }: { round: number; position: number; food: FoodOption; onChoose: (reaction: Reaction) => void; disabled: boolean }) { const progress = ((position + 1) / foods.length) * 100; return <div className="rating-screen"><div className="rating-top"><div><Brand /></div><span className="round-count">Round {round} · <strong>{position + 1}</strong> / 12</span></div><div className="progress-track"><span style={{ width: `${progress}%` }} /></div><div className="privacy-banner"><LockKeyhole size={16} /> Your choices are 100% private until both finish</div><div className={`food-card ${food.color}`}><div className="food-image" style={foodImages[food.id] ? { backgroundImage: `linear-gradient(180deg, rgba(17,28,45,.05), rgba(17,28,45,.3)), url(${foodImages[food.id]})` } : undefined}><span className="food-large-emoji">{food.emoji}</span><span className="food-sticker">Tonight’s option</span></div><div className="food-card-content"><h1>{food.name}</h1><p>{food.description}</p></div></div><p className="swipe-copy">How does this one feel?</p><div className="reaction-grid"><button className="reaction-button no" onClick={() => onChoose('not_today')} disabled={disabled}><span className="reaction-icon"><X size={28} strokeWidth={3} /></span><strong>Not today</strong></button><button className="reaction-button maybe" onClick={() => onChoose('maybe')} disabled={disabled}><span className="reaction-icon">🤔</span><strong>Maybe</strong></button><button className="reaction-button yes" onClick={() => onChoose('craving')} disabled={disabled}><span className="reaction-icon"><Heart size={29} /></span><strong>Craving it!</strong></button></div></div>; }
 
 function WaitingForPartner({ name }: { name: string }) { return <div className="center-screen"><div className="waiting-orbit"><LockKeyhole size={35} /></div><div className="eyebrow"><span className="live-dot" /> Choices locked in</div><h1>Nice picks,<br /><em>{name}.</em></h1><p>You’re all done. We’ll reveal what you both want as soon as your partner finishes.</p><div className="mini-progress">{foods.map((food) => <span key={food.id} className="done-dot" />)}</div><div className="privacy-card"><LockKeyhole size={20} /><span>Your choices are hidden. No peeking, promise.</span></div></div>; }
 
 function ProposalCard({ view, partnerName, food, onAccept, onReject, disabled }: { view: ProposalView; partnerName: string; food: FoodOption; onAccept: () => void; onReject: () => void; disabled: boolean }) {
+  // The sender waits; only the other participant gets the decision.
   if (view.mode === 'mine') {
     return <section className="proposal-card proposal-mine">
-      <span className="proposal-pill">{food.emoji} {food.name} proposed</span>
+      <span className="proposal-pill">Your proposal</span>
       <div className="proposal-food"><span className="proposal-emoji">{food.emoji}</span><div><strong>{food.name}</strong><small>{food.description}</small></div></div>
-      <p className="proposal-question">Waiting for {partnerName} to confirm your pick…</p>
-      <div className="proposal-waiting"><span className="proposal-spinner" /> Both of you decide together</div>
+      <p className="proposal-waiting"><span className="proposal-spinner" /> Waiting for {partnerName} to decide…</p>
     </section>;
   }
 
   return <section className="proposal-card proposal-theirs">
-    <span className="proposal-pill proposal-pill-theirs">{partnerName} picked</span>
+    <span className="proposal-pill proposal-pill-theirs">{partnerName}&apos;s pick</span>
     <div className="proposal-food"><span className="proposal-emoji">{food.emoji}</span><div><strong>{food.name}</strong><small>{food.description}</small></div></div>
-    <p className="proposal-question">Want to make this tonight&apos;s FoodMood?</p>
+    <p className="proposal-question">{partnerName} wants {food.name} tonight. Are you in?</p>
     <div className="proposal-actions">
       <button className="primary-button" onClick={onAccept} disabled={disabled}><Check size={18} /> Accept</button>
       <button className="secondary-button" onClick={onReject} disabled={disabled}><RotateCcw size={18} /> Reject &amp; start another round</button>
@@ -607,9 +593,9 @@ function ProposalCard({ view, partnerName, food, onAccept, onReject, disabled }:
   </section>;
 }
 
-function RevealScreen({ matches, proposal, partnerName, onPropose, onAccept, onReject, disabled, onAnotherRound }: { matches: Match[]; proposal: ProposalView; partnerName: string; onPropose: (food: FoodOption) => void; onAccept: () => void; onReject: () => void; disabled: boolean; onAnotherRound: () => void }) { const grouped = ['Perfect match', 'Possible match', 'Backup match'] as const; const proposedFood = proposal.mode === 'none' ? null : resolveFoodOption(proposal.foodOptionId); return <div className="reveal-screen"><div className="reveal-header"><div className="eyebrow"><Sparkles size={16} /> The reveal</div><span className="match-count">{matches.length} {matches.length === 1 ? 'match' : 'matches'}</span></div><h1>Look at you two.<br /><em>On the same page.</em></h1><p className="screen-intro">Here’s what survived both appetites. No scores, no blame — just good options.</p>{proposedFood ? <ProposalCard view={proposal} partnerName={partnerName} food={proposedFood} onAccept={onAccept} onReject={onReject} disabled={disabled} /> : matches.length ? <div className="matches-list">{grouped.map((tier) => { const tierMatches = matches.filter((match) => match.tier === tier); if (!tierMatches.length) return null; return <div className="match-group" key={tier}><div className="tier-heading"><span className={`tier-dot ${tier === 'Perfect match' ? 'perfect' : tier === 'Possible match' ? 'possible' : 'backup'}`} />{tier}<span>{tierMatches.length}</span></div>{tierMatches.map((match) => <button className={`match-card ${tier === 'Perfect match' ? 'match-perfect' : tier === 'Possible match' ? 'match-possible' : 'match-backup'}`} key={match.id} onClick={() => onPropose(match)} disabled={disabled}>{foodImages[match.id] ? <span className="match-photo" style={{ backgroundImage: `url(${foodImages[match.id]})` }} /> : <span className="match-emoji">{match.emoji}</span>}<span><strong>{match.emoji} {match.name}</strong><small>{match.description}</small></span><ChevronRight size={20} /></button>)}</div>})}</div> : <div className="empty-match"><div className="empty-icon">🍽️</div><h2>No shared cravings this round</h2><p>That happens. Fresh round, fresh chance to find your FoodMood.</p></div>}<div className="reveal-actions">{matches.length > 0 && !proposedFood ? <p><Heart size={15} fill="currentColor" /> Propose a match for {partnerName} to confirm</p> : !proposedFood ? <button className="secondary-button full" onClick={onAnotherRound} disabled={disabled}><RotateCcw size={18} /> Start another round</button> : null}</div></div>; }
+function RevealScreen({ matches, proposal, partnerName, onPropose, onAccept, onReject, disabled, onAnotherRound }: { matches: Match[]; proposal: ProposalView; partnerName: string; onPropose: (food: FoodOption) => void; onAccept: () => void; onReject: () => void; disabled: boolean; onAnotherRound: () => void }) { const groups = groupMatchesByTier(matches); const proposedFood = proposal.mode === 'none' ? null : resolveFoodOption(proposal.foodOptionId); return <div className="reveal-screen"><div className="reveal-header"><div className="eyebrow"><Sparkles size={16} /> The reveal</div><span className="match-count">{matches.length} {matches.length === 1 ? 'match' : 'matches'}</span></div><h1>Look at you two.<br /><em>On the same page.</em></h1><p className="screen-intro">Here’s what survived both appetites. No scores, no blame — just good options.</p>{proposedFood ? <ProposalCard view={proposal} partnerName={partnerName} food={proposedFood} onAccept={onAccept} onReject={onReject} disabled={disabled} /> : matches.length ? <div className="matches-list">{groups.map(({ tier, matches: tierMatches }) => { return <div className="match-group" key={tier}><div className="tier-heading"><span className={`tier-dot ${tier === 'Perfect match' ? 'perfect' : tier === 'Possible match' ? 'possible' : 'backup'}`} />{tier}<span>{tierMatches.length}</span></div>{tierMatches.map((match) => <button className={`match-card ${tier === 'Perfect match' ? 'match-perfect' : tier === 'Possible match' ? 'match-possible' : 'match-backup'}`} key={match.id} onClick={() => onPropose(match)} disabled={disabled}>{foodImages[match.id] ? <span className="match-photo" style={{ backgroundImage: `url(${foodImages[match.id]})` }} /> : <span className="match-emoji">{match.emoji}</span>}<span><strong>{match.emoji} {match.name}</strong><small>{match.description}</small></span><ChevronRight size={20} /></button>)}</div>})}</div> : <div className="empty-match"><div className="empty-icon">🍽️</div><h2>No shared cravings this round</h2><p>That happens. Fresh round, fresh chance to find your FoodMood.</p></div>}<div className="reveal-actions">{matches.length > 0 && !proposedFood ? <p><Heart size={15} fill="currentColor" /> Propose a match for {partnerName} to confirm</p> : !proposedFood ? <button className="secondary-button full" onClick={onAnotherRound} disabled={disabled}><RotateCcw size={18} /> Start another round</button> : null}</div></div>; }
 
-function ChosenScreen({ food, round, onAnotherRound, disabled }: { food: FoodOption; round: number; onAnotherRound: () => void; disabled: boolean }) { return <div className="chosen-screen"><div className="success-burst"><Check size={38} strokeWidth={3} /></div><div className="eyebrow"><Sparkles size={16} /> Tonight’s FoodMood</div><h1>{food.name}<em>!</em></h1><p className="chosen-subtitle">You’re both craving it.</p><div className="chosen-hero" style={foodImages[food.id] ? { backgroundImage: `linear-gradient(180deg, rgba(17,28,45,.05), rgba(17,28,45,.35)), url(${foodImages[food.id]})` } : undefined}><span className="chosen-match-badge"><Flame size={15} /> Perfect match</span><span className="chosen-emoji">{food.emoji}</span><span className="chosen-hero-label"><Heart size={17} /> Unanimous craving</span></div><div className="decision-summary"><div><span className="summary-icon"><Sparkles size={17} /></span><div><small>Decision summary</small><strong>Indecision defeated</strong></div></div><span className="saved-pill"><CheckCircle2 size={15} /> Both agreed</span><div className="summary-stats"><span><small>Decided by</small><strong>Two people</strong></span><span><small>Round</small><strong>{round} complete</strong></span></div></div><button className="primary-button full" onClick={onAnotherRound} disabled={disabled}><RotateCcw size={18} /> Start another round</button><button className="text-button">Done with dinner decisions</button></div>; }
+function ChosenScreen({ food, round, decidedBy, onAnotherRound, disabled }: { food: FoodOption; round: number; decidedBy: string; onAnotherRound: () => void; disabled: boolean }) { return <div className="chosen-screen"><div className="success-burst"><Check size={38} strokeWidth={3} /></div><div className="eyebrow"><Sparkles size={16} /> Tonight’s FoodMood</div><h1>{food.name}<em>!</em></h1><p className="chosen-subtitle">You’re both craving it.</p><div className="chosen-hero" style={foodImages[food.id] ? { backgroundImage: `linear-gradient(180deg, rgba(17,28,45,.05), rgba(17,28,45,.35)), url(${foodImages[food.id]})` } : undefined}><span className="chosen-match-badge"><Flame size={15} /> Perfect match</span><span className="chosen-emoji">{food.emoji}</span><span className="chosen-hero-label"><Heart size={17} /> Unanimous craving</span></div><div className="decision-summary"><div><span className="summary-icon"><Sparkles size={17} /></span><div><small>Decision summary</small><strong>Indecision defeated</strong></div></div><span className="saved-pill"><CheckCircle2 size={15} /> Both agreed</span><div className="summary-stats"><span><small>Decided by</small><strong>{decidedBy}</strong></span><span><small>Round</small><strong>{round} complete</strong></span></div></div><button className="primary-button full" onClick={onAnotherRound} disabled={disabled}><RotateCcw size={18} /> Start another round</button><button className="text-button">Done with dinner decisions</button></div>; }
 function FooterHint() { return <footer className="footer-hint"><Clock3 size={15} /> A tiny decision now, a much better dinner later.</footer>; }
 
 export default App;

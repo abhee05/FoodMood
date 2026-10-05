@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { FoodMoodState } from '@/lib/foodmood-api';
 import {
+  DECIDED_BY_FALLBACK, formatDecidedBy, groupMatchesByTier, MATCH_TIER_ORDER,
   resolveFlowOutcome, resolveProposalView, type ProposalView,
 } from '@/lib/session-flow';
 
@@ -147,5 +148,105 @@ describe('resolveProposalView — who sees what', () => {
 
   it('handles a missing session', () => {
     expect(resolveProposalView(null)).toEqual({ mode: 'none' });
+  });
+});
+describe('formatDecidedBy — real names on the result screen', () => {
+  it('shows both actual names joined with a plus', () => {
+    expect(formatDecidedBy('Ash', 'Abhishek')).toBe('Ash + Abhishek');
+  });
+
+  it('keeps long names intact rather than truncating', () => {
+    expect(formatDecidedBy('Ashwin Krishnamurthy', 'Abhishek Tripathi')).toBe(
+      'Ashwin Krishnamurthy + Abhishek Tripathi'
+    );
+  });
+
+  it('trims stray whitespace from stored names', () => {
+    expect(formatDecidedBy('  Ash  ', '  Abhishek  ')).toBe('Ash + Abhishek');
+  });
+
+  it('falls back to generic wording when the partner name is missing (old session)', () => {
+    expect(formatDecidedBy('Ash', null)).toBe(DECIDED_BY_FALLBACK);
+  });
+
+  it('falls back when my own name is missing', () => {
+    expect(formatDecidedBy('', 'Abhishek')).toBe(DECIDED_BY_FALLBACK);
+  });
+
+  it('falls back when a name is only whitespace', () => {
+    expect(formatDecidedBy('   ', 'Abhishek')).toBe(DECIDED_BY_FALLBACK);
+  });
+
+  it('falls back for a session with no names at all', () => {
+    expect(formatDecidedBy(null, undefined)).toBe(DECIDED_BY_FALLBACK);
+  });
+});
+
+describe('groupMatchesByTier — reveal priority and grouping', () => {
+  const perfect = { id: 'pizza', tier: 'Perfect match' as const };
+  const possible = { id: 'sushi', tier: 'Possible match' as const };
+  const backup = { id: 'thai', tier: 'Backup match' as const };
+
+  it('orders Perfect → Possible → Backup', () => {
+    const groups = groupMatchesByTier([perfect, possible, backup]);
+
+    expect(groups.map((group) => group.tier)).toEqual([
+      'Perfect match',
+      'Possible match',
+      'Backup match',
+    ]);
+  });
+
+  it('reorders a shuffled server response into tier priority', () => {
+    // The server returns a flat list; grouping is what guarantees the order.
+    const groups = groupMatchesByTier([backup, possible, perfect]);
+
+    expect(groups.map((group) => group.tier)).toEqual([
+      'Perfect match',
+      'Possible match',
+      'Backup match',
+    ]);
+  });
+
+  it('gives each tier its own group so headings are visually separate', () => {
+    const groups = groupMatchesByTier([perfect, possible, backup]);
+
+    expect(groups).toHaveLength(3);
+    expect(groups[0].matches).toEqual([perfect]);
+    expect(groups[1].matches).toEqual([possible]);
+    expect(groups[2].matches).toEqual([backup]);
+  });
+
+  it('keeps multiple matches together inside their own tier', () => {
+    const secondPerfect = { id: 'burger', tier: 'Perfect match' as const };
+    const groups = groupMatchesByTier([secondPerfect, backup, perfect]);
+
+    expect(groups).toHaveLength(2);
+    expect(groups[0].tier).toBe('Perfect match');
+    expect(groups[0].matches.map((match) => match.id)).toEqual(['burger', 'pizza']);
+  });
+
+  it('drops empty tiers instead of rendering an empty heading', () => {
+    const groups = groupMatchesByTier([possible]);
+
+    expect(groups.map((group) => group.tier)).toEqual(['Possible match']);
+  });
+
+  it('handles a single perfect match', () => {
+    expect(groupMatchesByTier([perfect])).toEqual([
+      { tier: 'Perfect match', matches: [perfect] },
+    ]);
+  });
+
+  it('returns no groups when there are no matches', () => {
+    expect(groupMatchesByTier([])).toEqual([]);
+  });
+
+  it('pins the reveal order used by the UI', () => {
+    expect(MATCH_TIER_ORDER).toEqual([
+      'Perfect match',
+      'Possible match',
+      'Backup match',
+    ]);
   });
 });

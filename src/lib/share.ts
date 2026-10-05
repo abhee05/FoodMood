@@ -1,11 +1,9 @@
 /**
  * Invite-link and clipboard helpers.
  *
- * Kept free of React so the share/copy behaviour is unit testable, and so the
- * lobby buttons have a single source of truth for URL building.
+ * Kept free of React so the lobby's URL building and Copy Code behaviour are
+ * unit testable.
  */
-
-export type ShareOutcome = 'shared' | 'copied' | 'cancelled' | 'failed';
 
 /** Builds the join URL for the current session, preserving the app pathname. */
 export function buildJoinUrl(code: string, origin?: string, pathname?: string): string {
@@ -15,14 +13,6 @@ export function buildJoinUrl(code: string, origin?: string, pathname?: string): 
     ?? (typeof window !== 'undefined' ? window.location.pathname : '/');
 
   return `${base}${path}?join=${encodeURIComponent(code.trim())}`;
-}
-
-function isAbortError(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    (error as { name?: string }).name === 'AbortError'
-  );
 }
 
 /**
@@ -72,27 +62,4 @@ export async function copyTextToClipboard(text: string): Promise<boolean> {
 /** Copies the raw session join code, e.g. "MOOD-7K2P". */
 export async function copyJoinCode(code: string): Promise<boolean> {
   return copyTextToClipboard(code.trim());
-}
-
-/**
- * Shares the invite link using the native Web Share API when the browser
- * supports it, otherwise copies the link to the clipboard so the user can
- * paste it into any messenger (WhatsApp, iMessage, ...).
- */
-export async function shareInviteLink(url: string, code: string): Promise<ShareOutcome> {
-  if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
-    try {
-      await navigator.share({
-        title: 'Join my FoodMood',
-        text: `Pick tonight's meal together. Join code: ${code.trim()}`,
-        url,
-      });
-      return 'shared';
-    } catch (error) {
-      // A user-cancelled share must not silently copy to the clipboard.
-      if (isAbortError(error)) return 'cancelled';
-    }
-  }
-
-  return (await copyTextToClipboard(url)) ? 'copied' : 'failed';
 }

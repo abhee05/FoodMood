@@ -67,3 +67,56 @@ export function resolveProposalView(session: FoodMoodState | null): ProposalView
     ? { mode: 'mine', foodOptionId }
     : { mode: 'theirs', foodOptionId };
 }
+
+/** Shown when a session predates real display names. */
+export const PARTNER_FALLBACK_NAME = 'Your partner';
+
+/** Shown on the result screen when either name is missing. */
+export const DECIDED_BY_FALLBACK = 'Two people';
+
+/**
+ * "Ash + Abhishek" on the result screen, falling back to generic wording for
+ * sessions created before names were captured.
+ *
+ * Takes the *raw* partner name so a missing name is distinguishable from the
+ * "Your partner" placeholder.
+ */
+export function formatDecidedBy(
+  myName: string | null | undefined,
+  partnerName: string | null | undefined
+): string {
+  const mine = (myName ?? '').trim();
+  const theirs = (partnerName ?? '').trim();
+
+  if (mine && theirs) return `${mine} + ${theirs}`;
+  return DECIDED_BY_FALLBACK;
+}
+
+export type MatchTier = 'Perfect match' | 'Possible match' | 'Backup match';
+
+export type TieredMatch = { tier: MatchTier };
+
+export type MatchTierGroup<T> = { tier: MatchTier; matches: T[] };
+
+/** Reveal order, highest confidence first. Also the visual top-to-bottom order. */
+export const MATCH_TIER_ORDER: readonly MatchTier[] = [
+  'Perfect match',
+  'Possible match',
+  'Backup match',
+];
+
+/**
+ * Groups matches under their own heading in confidence order.
+ *
+ * The server returns a flat list in whatever order the tier CASE produced, so
+ * grouping here is what guarantees the reveal always reads
+ * Perfect → Possible → Backup. Empty tiers are dropped rather than rendered as
+ * an empty heading.
+ */
+export function groupMatchesByTier<T extends TieredMatch>(
+  matches: readonly T[]
+): MatchTierGroup<T>[] {
+  return MATCH_TIER_ORDER
+    .map((tier) => ({ tier, matches: matches.filter((match) => match.tier === tier) }))
+    .filter((group) => group.matches.length > 0);
+}
