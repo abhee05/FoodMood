@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import type { FoodMoodState } from '@/lib/foodmood-api';
+import { buildJoinUrl, readJoinCodeFromSearch } from '@/lib/share';
 import {
-  DECIDED_BY_FALLBACK, formatDecidedBy, groupMatchesByTier, MATCH_TIER_ORDER,
-  resolveFlowOutcome, resolveProposalView, type ProposalView,
+  DECIDED_BY_FALLBACK, formatDecidedBy, groupMatchesByTier, isValidJoinCode,
+  MATCH_TIER_ORDER, resolveFlowOutcome, resolveInitialScreen, resolveLobbyView,
+  resolveProposalView, type ProposalView,
 } from '@/lib/session-flow';
 
 const SESSION_ID = '1c1bb1a6-2362-44a8-9e6e-b37d3df89739';
@@ -248,5 +250,124 @@ describe('groupMatchesByTier — reveal priority and grouping', () => {
       'Possible match',
       'Backup match',
     ]);
+  });
+});
+
+describe('isValidJoinCode', () => {
+  it('accepts a real server code', () => {
+    expect(isValidJoinCode('MOOD-YD3G')).toBe(true);
+  });
+
+  it('accepts a lowercase code', () => {
+    expect(isValidJoinCode('mood-yd3g')).toBe(true);
+  });
+
+  it('accepts surrounding whitespace', () => {
+    expect(isValidJoinCode('  MOOD-YD3G  ')).toBe(true);
+  });
+
+  it('accepts a one and a seven character suffix', () => {
+    expect(isValidJoinCode('MOOD-A')).toBe(true);
+    expect(isValidJoinCode('MOOD-ABCDEFG')).toBe(true);
+  });
+
+  it('rejects a suffix longer than the join input can hold', () => {
+    expect(isValidJoinCode('MOOD-ABCDEFGH')).toBe(false);
+  });
+
+  it('rejects a missing prefix or suffix', () => {
+    expect(isValidJoinCode('MOOD-')).toBe(false);
+    expect(isValidJoinCode('YD3G')).toBe(false);
+  });
+
+  it('rejects the wrong separator or non-alphanumerics', () => {
+    expect(isValidJoinCode('MOOD_YD3G')).toBe(false);
+    expect(isValidJoinCode('MOOD-YD-3G')).toBe(false);
+    expect(isValidJoinCode('MOOD-YD 3G')).toBe(false);
+  });
+
+  it('rejects empty and missing codes', () => {
+    expect(isValidJoinCode('')).toBe(false);
+    expect(isValidJoinCode(null)).toBe(false);
+    expect(isValidJoinCode(undefined)).toBe(false);
+  });
+});
+
+describe('resolveInitialScreen — an invite link opens Join, not Home', () => {
+  it('routes a valid invite straight to Join', () => {
+    expect(resolveInitialScreen('?join=MOOD-YD3G')).toBe('join');
+  });
+
+  it('routes to Join even before the code is uppercased', () => {
+    expect(resolveInitialScreen('?join=mood-yd3g')).toBe('join');
+  });
+
+  it('routes to Join with other query parameters present', () => {
+    expect(resolveInitialScreen('?utm_source=wa&join=MOOD-YD3G')).toBe('join');
+  });
+
+  it('shows Home when there is no join parameter', () => {
+    expect(resolveInitialScreen('')).toBe('home');
+    expect(resolveInitialScreen('?utm_source=wa')).toBe('home');
+  });
+
+  it('shows Home for an invalid code rather than a join form that cannot work', () => {
+    expect(resolveInitialScreen('?join=')).toBe('home');
+    expect(resolveInitialScreen('?join=nonsense')).toBe('home');
+    expect(resolveInitialScreen('?join=MOOD-ABCDEFGH')).toBe('home');
+  });
+
+  it('only matches the exact join parameter name', () => {
+    expect(resolveInitialScreen('?joney=MOOD-YD3G')).toBe('home');
+  });
+
+  it('routes the URL produced by buildJoinUrl to Join', () => {
+    const url = buildJoinUrl('MOOD-YD3G', 'https://foodmood.app', '/');
+    expect(resolveInitialScreen(url.slice(url.indexOf('?')))).toBe('join');
+  });
+
+  it('routes a nested-pathname invite to Join too', () => {
+    const url = buildJoinUrl('MOOD-YD3G', 'https://x.vercel.app', '/app/');
+    expect(url).toBe('https://x.vercel.app/app/?join=MOOD-YD3G');
+    expect(resolveInitialScreen('?join=MOOD-YD3G')).toBe('join');
+  });
+
+  it('keeps the code so the invited user only types a name', () => {
+    const search = '?join=MOOD-YD3G';
+    expect(readJoinCodeFromSearch(search)).toBe('MOOD-YD3G');
+    expect(resolveInitialScreen(search)).toBe('join');
+  });
+});
+
+describe('resolveLobbyView — invitation section only while a seat is open', () => {
+  it('shows the invite card while waiting for the second participant', () => {
+    expect(resolveLobbyView(false)).toEqual({
+      invite: true,
+      duoStatus: true,
+      canStartRating: false,
+    });
+  });
+
+  it('removes the invite card once participant 2 joins', () => {
+    expect(resolveLobbyView(true)).toEqual({
+      invite: false,
+      duoStatus: true,
+      canStartRating: true,
+    });
+  });
+
+  it('keeps the two-person status in both states', () => {
+    expect(resolveLobbyView(false).duoStatus).toBe(true);
+    expect(resolveLobbyView(true).duoStatus).toBe(true);
+  });
+
+  it('never offers sharing controls at two participants', () => {
+    // invite=false is what drops the code, copy icon, invite URL and instructions.
+    expect(resolveLobbyView(true).invite).toBe(false);
+  });
+
+  it('enables Start rating exactly when the second participant is present', () => {
+    expect(resolveLobbyView(true).canStartRating).toBe(true);
+    expect(resolveLobbyView(false).canStartRating).toBe(false);
   });
 });

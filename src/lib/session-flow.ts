@@ -1,4 +1,5 @@
 import type { FoodMoodState } from '@/lib/foodmood-api';
+import { readJoinCodeFromSearch } from '@/lib/share';
 
 /**
  * Pure decision logic for the reveal → proposal → confirmation flow.
@@ -66,6 +67,59 @@ export function resolveProposalView(session: FoodMoodState | null): ProposalView
     session.proposedByParticipantId === session.participantId
     ? { mode: 'mine', foodOptionId }
     : { mode: 'theirs', foodOptionId };
+}
+
+/**
+ * Join codes as issued by the server, e.g. MOOD-YD3G. The 12-character join
+ * input cannot hold anything longer, so a longer suffix is not a real code.
+ */
+export const JOIN_CODE_PATTERN = /^MOOD-[A-Z0-9]{1,7}$/i;
+
+export function isValidJoinCode(code: string | null | undefined): boolean {
+  return JOIN_CODE_PATTERN.test((code ?? '').trim());
+}
+
+export type InitialScreen = 'home' | 'join';
+
+/**
+ * Decides the very first screen from the URL alone.
+ *
+ * A valid `?join=MOOD-XXXX` means the visitor followed an invite, so Join
+ * renders immediately instead of flashing the homepage for a moment. Runs as
+ * the `useState` initialiser, before auth resolves, so the code is never lost
+ * and the flash cannot happen.
+ *
+ * An invalid or absent code falls back to the homepage, which is also the
+ * safer failure mode: a junk parameter lands on Home rather than on a Join
+ * form that cannot possibly succeed.
+ */
+export function resolveInitialScreen(search: string): InitialScreen {
+  return isValidJoinCode(readJoinCodeFromSearch(search)) ? 'join' : 'home';
+}
+
+export type LobbyView = {
+  /** Invite card: join code, copy icon, invite URL and instructions. */
+  invite: boolean;
+  /** Both participant rows and the seated count. */
+  duoStatus: boolean;
+  /** Whether Start rating is enabled. */
+  canStartRating: boolean;
+};
+
+/**
+ * Which parts of the lobby are visible.
+ *
+ * FoodMood V1 is exactly two people, so the invite card is useful only while a
+ * seat is open. Once the second participant joins there is nothing left to
+ * share and the whole invitation section is dropped — for the creator and the
+ * joiner alike — leaving just the two-person status and Start rating.
+ */
+export function resolveLobbyView(partnerJoined: boolean): LobbyView {
+  return {
+    invite: !partnerJoined,
+    duoStatus: true,
+    canStartRating: partnerJoined,
+  };
 }
 
 /** Shown when a session predates real display names. */
