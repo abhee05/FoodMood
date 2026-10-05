@@ -72,3 +72,26 @@ h1 em { color: #ff5733; font-family: inherit; font-weight: 800; letter-spacing: 
 .inline-error svg { flex: 0 0 auto; }
 @media (min-width: 680px) { .form-screen .name-field { max-width: 430px; } }
 
+/* --- Invite sharing + proposal confirmation --- */
+.share-option-button { border: 0; display: inline-flex; align-items: center; gap: 5px; background: #edf3ff; color: #303849; padding: 9px 11px; border-radius: 999px; font-size: 11px; font-weight: 700; }
+.share-option-button:hover { background: #e0eaff; }
+.copy-feedback { display: inline-flex; align-items: center; gap: 6px; margin-top: 12px; padding: 9px 15px; border-radius: 999px; color: #005236; background: #c7f8e4; font-size: 12px; font-weight: 800; animation: copy-pop .22s ease; }
+@keyframes copy-pop { from { opacity: 0; transform: translateY(4px) scale(.96); } to { opacity: 1; transform: none; } }
+.proposal-card { margin-top: 29px; padding: 22px; text-align: center; border-radius: 28px; box-shadow: 0 15px 35px rgba(70,37,24,.07); }
+.proposal-mine { background: radial-gradient(circle at 50% 0%, #fff4e2, transparent 55%), #fffdf9; border: 1px solid #ffe3bd; }
+.proposal-theirs { background: radial-gradient(circle at 50% 0%, #fff0e8, transparent 55%), #fffdf9; border: 1px solid #ffd2c6; }
+.proposal-pill { display: inline-flex; align-items: center; gap: 7px; padding: 8px 15px; border-radius: 999px; color: #5b3a00; background: #ffda9c; font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .6px; }
+.proposal-pill-theirs { color: #7a1c08; background: #ffda9c; }
+.proposal-food { display: flex; align-items: center; gap: 14px; text-align: left; margin-top: 18px; padding: 14px; border-radius: 22px; background: white; box-shadow: 0 8px 20px rgba(30,41,59,.06); }
+.proposal-emoji { width: 62px; height: 62px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 18px; background: #fff0d5; font-size: 34px; }
+.proposal-food div { display: grid; gap: 4px; min-width: 0; }
+.proposal-food strong { font-size: 19px; font-weight: 800; }
+.proposal-food small { color: #5b403a; font-size: 12px; line-height: 1.35; }
+.proposal-question { margin-top: 18px; color: #5b403a; font-size: 15px; font-weight: 700; }
+.proposal-actions { margin-top: 20px; display: grid; gap: 11px; }
+.proposal-actions .primary-button, .proposal-actions .secondary-button { width: 100%; }
+.proposal-waiting { margin-top: 18px; display: inline-flex; align-items: center; gap: 9px; color: #6c5e59; font-size: 12px; font-weight: 700; }
+.proposal-spinner { width: 15px; height: 15px; border-radius: 50%; border: 2.5px solid #ffd2c6; border-top-color: #ff5733; animation: proposal-spin .9s linear infinite; }
+@keyframes proposal-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .proposal-spinner { animation: none; } .copy-feedback { animation: none; } }
+@media (max-width: 390px) { .proposal-card { padding: 18px 15px; border-radius: 24px; } .proposal-emoji { width: 52px; height: 52px; font-size: 28px; } .proposal-food strong { font-size: 17px; } }

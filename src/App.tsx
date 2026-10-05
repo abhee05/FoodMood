@@ -5,10 +5,16 @@ import {
 } from 'lucide-react';
 import {
   authenticateAnonymously, createFoodMoodSession, getFoodMoodMatches, getFoodMoodSessionState,
-  joinFoodMoodSession, MAX_DISPLAY_NAME_LENGTH, normalizeDisplayName, selectFinalFoodMood,
-  startAnotherFoodMoodRound, submitFoodMoodReactions, type FoodMoodMatch, type FoodMoodRoundStart,
-  type FoodMoodState, type Reaction,
+  acceptFoodMoodProposal, joinFoodMoodSession, MAX_DISPLAY_NAME_LENGTH, normalizeDisplayName,
+  proposeFoodMood, rejectFoodMoodProposal, startAnotherFoodMoodRound, submitFoodMoodReactions,
+  type FoodMoodMatch, type FoodMoodRoundStart, type FoodMoodState, type Reaction,
 } from '@/lib/foodmood-api';
+import {
+  buildJoinUrl, copyJoinCode, shareInviteLink,
+} from '@/lib/share';
+import {
+  resolveFlowOutcome, resolveProposalView, type ProposalView,
+} from '@/lib/session-flow';
 
 type Screen = 'home' | 'join' | 'waiting' | 'rating' | 'wait' | 'reveal' | 'chosen';
 type FoodOption = { id: string; name: string; emoji: string; description: string; color: string };
@@ -95,10 +101,12 @@ function App() {
   const [matches, setMatches] = useState<Match[]>([]);
   const [selectedFoodId, setSelectedFoodId] = useState<string | null>(null);
   const [waitingNotice, setWaitingNotice] = useState('');
+  const [shareNotice, setShareNotice] = useState('');
 
   const screenRef = useRef<Screen>(screen);
   const sessionRef = useRef<FoodMoodState | null>(session);
   const pendingSyncRef = useRef<Promise<FoodMoodState> | null>(null);
+  const noticeTimerRef = useRef<number | null>(null);
 
   const currentFood = foods[position];
   const sessionId = session?.sessionId ?? null;
@@ -107,6 +115,7 @@ function App() {
   const partnerName = session?.partnerName || PARTNER_FALLBACK_NAME;
   const chosenFood = resolveFoodOption(selectedFoodId ?? session?.finalFoodOptionId ?? null);
   const isLiveScreen = LIVE_SCREENS.has(screen);
+  const proposal = resolveProposalView(session);
 
   useEffect(() => { screenRef.current = screen; }, [screen]);
   useEffect(() => { sessionRef.current = session; }, [session]);
@@ -195,17 +204,23 @@ function App() {
    */
   const reconcile = useCallback(async (isCurrent: () => boolean): Promise<void> => {
     try {
-      const previous = sessionRef.current;
+      const previousRoundNumber = sessionRef.current?.roundNumber ?? null;
       const next = await syncSession();
       if (!isCurrent()) return;
 
-      if (next.roundNumber > (previous?.roundNumber ?? next.roundNumber)) {
+      const outcome = resolveFlowOutcome(
+        previousRoundNumber,
+        next,
+        screenRef.current
+      );
+
+      if (outcome === 'newRound') {
         beginRoundLocally();
         setScreen('rating');
         return;
       }
 
-      if (next.finalFoodOptionId) {
+      if (outcome === 'final') {
         setSelectedFoodId(next.finalFoodOptionId);
         setWaitingNotice('');
         setError('');
@@ -213,7 +228,7 @@ function App() {
         return;
       }
 
-      if (next.bothFinished && screenRef.current === 'wait') {
+      if (outcome === 'reveal') {
         const nextMatches = await loadMatches(next.roundId);
         if (!isCurrent()) return;
         setMatches(nextMatches);
@@ -282,9 +297,51 @@ function App() {
     setMatches([]);
     setSelectedFoodId(null);
     setWaitingNotice('');
+    setShareNotice('');
     setError('');
     setScreen('home');
   }, [clearActiveSession]);
+
+  const flashNotice = useCallback((message: string) => {
+    setShareNotice(message);
+    if (noticeTimerRef.current !== null) window.clearTimeout(noticeTimerRef.current);
+    noticeTimerRef.current = window.setTimeout(() => {
+      setShareNotice('');
+      noticeTimerRef.current = null;
+    }, 2800);
+  }, []);
+
+  useEffect(() => () => {
+    if (noticeTimerRef.current !== null) window.clearTimeout(noticeTimerRef.current);
+  }, []);
+
+  /** Shares the invite link, falling back to a clipboard copy when needed. */
+  const shareInvite = useCallback(async () => {
+    const code = sessionRef.current?.joinCode;
+    if (!code) {
+      setError('Your invite link is not ready yet.');
+      return;
+    }
+
+    setError('');
+    const outcome = await shareInviteLink(buildJoinUrl(code), code);
+
+    if (outcome === 'copied') flashNotice('Invite link copied ✓');
+    else if (outcome === 'failed') setError('We could not share or copy the invite link.');
+  }, [flashNotice]);
+
+  /** Copies just the session join code. */
+  const copyCode = useCallback(async () => {
+    const code = sessionRef.current?.joinCode;
+    if (!code) {
+      setError('Your join code is not ready yet.');
+      return;
+    }
+
+    setError('');
+    if (await copyJoinCode(code)) flashNotice('Code copied ✓');
+    else setError('We could not copy the code. Please share it another way.');
+  }, [flashNotice]);
 
   // Re-attach to an in-flight session after a browser refresh.
   useEffect(() => {
@@ -413,24 +470,62 @@ function App() {
     } finally { setBusy(false); }
   };
 
-  const selectFood = async (food: FoodOption) => {
+  /**
+   * Step A/B — propose a shared match. This is a proposal, not a decision: the
+   * partner still has to accept it. If the partner proposed a different match
+   * first, their proposal wins and the refresh below surfaces it.
+   */
+  const proposeFood = async (food: FoodOption) => {
+    if (!session) return;
     setBusy(true); setError('');
     try {
-      if (!session) return;
-      await selectFinalFoodMood(session.roundId, food.id);
-      setSelectedFoodId(food.id);
-      setScreen('chosen');
+      await proposeFoodMood(session.roundId, food.id);
       await syncSession(true);
     } catch (failure: unknown) {
       try {
         const next = await syncSession(true);
-        if (next.finalFoodOptionId) {
-          setSelectedFoodId(next.finalFoodOptionId);
-          setScreen('chosen');
-        } else throw failure;
+        // A pending proposal from the partner supersedes our failed attempt.
+        if (next.proposedFoodOptionId) return;
+        throw failure;
       } catch (refreshFailure: unknown) {
-        setError(refreshFailure instanceof Error ? refreshFailure.message : 'Your partner may have already chosen the final FoodMood.');
+        setError(refreshFailure instanceof Error ? refreshFailure.message : 'We could not propose that FoodMood. Please try again.');
       }
+    } finally { setBusy(false); }
+  };
+
+  /** Step D — accept the partner's proposal and finalize the FoodMood. */
+  const acceptProposal = async () => {
+    if (!session?.proposedFoodOptionId) return;
+    setBusy(true); setError('');
+    try {
+      await acceptFoodMoodProposal(session.roundId);
+      const next = await syncSession(true);
+      if (next.finalFoodOptionId) {
+        setSelectedFoodId(next.finalFoodOptionId);
+        setScreen('chosen');
+      }
+    } catch (failure: unknown) {
+      setError(failure instanceof Error ? failure.message : 'We could not confirm the FoodMood. Please try again.');
+      // A rejection elsewhere means the round moved on; let polling catch up.
+      void syncSession(true).catch(() => {});
+    } finally { setBusy(false); }
+  };
+
+  /** Step E — reject the partner's proposal and roll into the next round. */
+  const rejectProposal = async () => {
+    if (!session) return;
+    const previousRound = session.roundNumber;
+    setBusy(true); setError('');
+    try {
+      await rejectFoodMoodProposal(session.roundId);
+      const next = await syncSession(true);
+      if (next.roundNumber > previousRound) {
+        beginRoundLocally();
+        setScreen('rating');
+      }
+    } catch (failure: unknown) {
+      setError(failure instanceof Error ? failure.message : 'We could not reject that pick. Please try again.');
+      void syncSession(true).catch(() => {});
     } finally { setBusy(false); }
   };
 
@@ -464,20 +559,14 @@ function App() {
       {waitingNotice && screen === 'wait' && <InlineError message={waitingNotice} />}
       {screen === 'home' && <HomeScreen name={displayName} setName={setDisplayName} nameError={nameError} onCreate={startCreate} onJoin={() => { setNameError(''); setError(''); setScreen('join'); }} disabled={!authReady || busy} />}
       {screen === 'join' && <JoinScreen name={displayName} setName={setDisplayName} nameError={nameError} code={joinCode} setCode={setJoinCode} error={error} onJoin={startJoin} onBack={() => { setError(''); setNameError(''); setScreen('home'); }} disabled={!authReady || busy} />}
-      {screen === 'waiting' && session && <WaitingScreen code={session.joinCode} name={myName || 'You'} partnerName={partnerName} partnerJoined={session.partnerJoined} onStart={beginRating} disabled={busy} onCopy={() => void copyJoinLink(session.joinCode)} />}
+      {screen === 'waiting' && session && <WaitingScreen code={session.joinCode} name={myName || 'You'} partnerName={partnerName} partnerJoined={session.partnerJoined} onStart={beginRating} disabled={busy} onShare={() => void shareInvite()} onCopyCode={() => void copyCode()} notice={shareNotice} />}
       {screen === 'rating' && <RatingScreen round={roundNumber} position={position} food={currentFood} onChoose={chooseReaction} disabled={busy} />}
       {screen === 'wait' && <WaitingForPartner name={myName || 'there'} />}
-      {screen === 'reveal' && <RevealScreen matches={matches} onSelect={selectFood} disabled={busy} onAnotherRound={startAnotherRound} />}
+      {screen === 'reveal' && <RevealScreen matches={matches} proposal={proposal} partnerName={partnerName} onPropose={proposeFood} onAccept={() => void acceptProposal()} onReject={() => void rejectProposal()} disabled={busy} onAnotherRound={startAnotherRound} />}
       {screen === 'chosen' && chosenFood && <ChosenScreen food={chosenFood} round={roundNumber} onAnotherRound={startAnotherRound} disabled={busy} />}
     </main>
     {screen !== 'rating' && screen !== 'home' && <FooterHint />}
   </div></div>;
-}
-
-async function copyJoinLink(code: string): Promise<void> {
-  const url = `${window.location.origin}${window.location.pathname}?join=${encodeURIComponent(code)}`;
-  if (navigator.share) { await navigator.share({ title: 'Join my FoodMood', url }); return; }
-  await navigator.clipboard.writeText(url);
 }
 
 function TopBar({ onBack, initial }: { onBack: () => void; initial: string }) { return <header className="topbar"><button className="icon-button" onClick={onBack} aria-label="Go back"><ArrowLeft size={24} /></button><div className="brand-mark small"><Utensils size={18} /></div><span className="topbar-title">FoodMood</span><div className="avatar">{initial}</div></header>; }
@@ -491,13 +580,34 @@ function HomeScreen({ name, setName, nameError, onCreate, onJoin, disabled }: { 
 
 function JoinScreen({ name, setName, nameError, code, setCode, error, onJoin, onBack, disabled }: { name: string; setName: (value: string) => void; nameError: string; code: string; setCode: (value: string) => void; error: string; onJoin: () => void; onBack: () => void; disabled: boolean }) { return <div className="form-screen"><div className="eyebrow"><Users size={16} /> Join a FoodMood</div><h1>Bring your<br /><em>appetite.</em></h1><p className="screen-intro">Enter the secret code your person sent you. You’ll both rate the same 12 foods.</p><NameField id="join-name" value={name} setValue={setName} label="Your name" placeholder="e.g. Abhishek" error={nameError} /><label className="field-label" htmlFor="join-code">Session join code</label><div className="code-input-wrap"><Clipboard size={19} /><input id="join-code" value={code} onChange={(event) => setCode(event.target.value.toUpperCase())} placeholder="MOOD-48" maxLength={12} /></div>{error && <p className="error-message">{error}</p>}<button className="primary-button full" onClick={onJoin} disabled={disabled || !code.trim()}>Join FoodMood <ArrowRight size={19} /></button><button className="text-button" onClick={onBack}>I’d rather create one</button><div className="info-card"><LockKeyhole size={20} /><div><strong>Private by design</strong><span>Your choices stay hidden from your partner until you both finish.</span></div></div></div>; }
 
-function WaitingScreen({ code, name, partnerName, partnerJoined, onStart, disabled, onCopy }: { code: string; name: string; partnerName: string; partnerJoined: boolean; onStart: () => void; disabled: boolean; onCopy: () => void }) { return <div className="waiting-screen"><div className="eyebrow"><span className="live-dot" /> Lobby active · two-to-tango</div><section className="lobby-card"><div className="round-pill"><Flame size={16} /> Table for two</div><h1>Grab your partner<br />in dine</h1><p>Share this secret code to pair appetites and banish “I don’t know, whatever you want” forever.</p><span className="code-label">Session join code</span><div className="session-code"><span>{code}</span><button className="copy-button" aria-label="Copy session link" onClick={onCopy}><Copy size={20} /></button></div><button className="primary-button full" onClick={onCopy}><Share2 size={19} /> Share invite link</button><div className="share-options"><span><MessageCircle size={16} /> Share link</span><span><Copy size={16} /> Copy code</span></div></section><section className="status-card"><div className="section-heading"><h2>Dining duo status</h2><span className="seat-pill"><span /> {partnerJoined ? '2 of 2' : '1 of 2'} seated</span></div><div className="person-row"><div className="person-avatar coral-bg">{nameInitial(name)}</div><div className="person-info"><strong>You ({name})</strong><span className="ready-text"><CheckCircle2 size={15} /> Ready to choose</span></div><span className="ready-pill">READY</span></div><div className="person-row waiting-row"><div className="person-avatar waiting-avatar"><Users size={22} /></div><div className="person-info"><strong>{partnerJoined ? `${partnerName} is here` : `Waiting for ${partnerName}…`}</strong><span>{partnerJoined ? 'Your table is ready.' : 'Share this code so they can join.'}</span></div></div><button className="primary-button full start-button" onClick={onStart} disabled={!partnerJoined || disabled}><Utensils size={19} /> {partnerJoined ? 'Start rating' : 'Waiting for partner'}</button></section><div className="deck-preview"><div><span>Tonight’s deck preview</span><strong>12 options loaded</strong></div><div className="preview-chips">{foods.slice(0, 4).map((food) => <span key={food.id}>{food.emoji} {food.name}</span>)}</div></div></div>; }
+function WaitingScreen({ code, name, partnerName, partnerJoined, onStart, disabled, onShare, onCopyCode, notice }: { code: string; name: string; partnerName: string; partnerJoined: boolean; onStart: () => void; disabled: boolean; onShare: () => void; onCopyCode: () => void; notice: string }) { return <div className="waiting-screen"><div className="eyebrow"><span className="live-dot" /> Lobby active · two-to-tango</div><section className="lobby-card"><div className="round-pill"><Flame size={16} /> Table for two</div><h1>Grab your partner<br />in dine</h1><p>Share this secret code to pair appetites and banish “I don’t know, whatever you want” forever.</p><span className="code-label">Session join code</span><div className="session-code"><span>{code}</span><button className="copy-button" aria-label="Copy session code" onClick={onCopyCode}><Copy size={20} /></button></div><button className="primary-button full" onClick={onShare}><Share2 size={19} /> Share invite link</button><div className="share-options"><span><MessageCircle size={16} /> Share link</span><button type="button" className="share-option-button" onClick={onCopyCode}><Copy size={16} /> Copy code</button></div>{notice && <p className="copy-feedback" role="status">{notice}</p>}</section><section className="status-card"><div className="section-heading"><h2>Dining duo status</h2><span className="seat-pill"><span /> {partnerJoined ? '2 of 2' : '1 of 2'} seated</span></div><div className="person-row"><div className="person-avatar coral-bg">{nameInitial(name)}</div><div className="person-info"><strong>You ({name})</strong><span className="ready-text"><CheckCircle2 size={15} /> Ready to choose</span></div><span className="ready-pill">READY</span></div><div className="person-row waiting-row"><div className="person-avatar waiting-avatar"><Users size={22} /></div><div className="person-info"><strong>{partnerJoined ? `${partnerName} is here` : `Waiting for ${partnerName}…`}</strong><span>{partnerJoined ? 'Your table is ready.' : 'Share this code so they can join.'}</span></div></div><button className="primary-button full start-button" onClick={onStart} disabled={!partnerJoined || disabled}><Utensils size={19} /> {partnerJoined ? 'Start rating' : 'Waiting for partner'}</button></section><div className="deck-preview"><div><span>Tonight’s deck preview</span><strong>12 options loaded</strong></div><div className="preview-chips">{foods.slice(0, 4).map((food) => <span key={food.id}>{food.emoji} {food.name}</span>)}</div></div></div>; }
 
 function RatingScreen({ round, position, food, onChoose, disabled }: { round: number; position: number; food: FoodOption; onChoose: (reaction: Reaction) => void; disabled: boolean }) { const progress = ((position + 1) / foods.length) * 100; return <div className="rating-screen"><div className="rating-top"><div><Brand /></div><span className="round-count">Round {round} · <strong>{position + 1}</strong> / 12</span></div><div className="progress-track"><span style={{ width: `${progress}%` }} /></div><div className="privacy-banner"><LockKeyhole size={16} /> Your choices are 100% private until both finish</div><div className={`food-card ${food.color}`}><div className="food-image" style={foodImages[food.id] ? { backgroundImage: `linear-gradient(180deg, rgba(17,28,45,.05), rgba(17,28,45,.3)), url(${foodImages[food.id]})` } : undefined}><span className="food-large-emoji">{food.emoji}</span><span className="food-sticker">Tonight’s option</span></div><div className="food-card-content"><h1>{food.name}</h1><p>{food.description}</p></div></div><p className="swipe-copy">How does this one feel?</p><div className="reaction-grid"><button className="reaction-button no" onClick={() => onChoose('not_today')} disabled={disabled}><span className="reaction-icon"><X size={28} strokeWidth={3} /></span><strong>Not today</strong></button><button className="reaction-button maybe" onClick={() => onChoose('maybe')} disabled={disabled}><span className="reaction-icon">🤔</span><strong>Maybe</strong></button><button className="reaction-button yes" onClick={() => onChoose('craving')} disabled={disabled}><span className="reaction-icon"><Heart size={29} /></span><strong>Craving it!</strong></button></div></div>; }
 
 function WaitingForPartner({ name }: { name: string }) { return <div className="center-screen"><div className="waiting-orbit"><LockKeyhole size={35} /></div><div className="eyebrow"><span className="live-dot" /> Choices locked in</div><h1>Nice picks,<br /><em>{name}.</em></h1><p>You’re all done. We’ll reveal what you both want as soon as your partner finishes.</p><div className="mini-progress">{foods.map((food) => <span key={food.id} className="done-dot" />)}</div><div className="privacy-card"><LockKeyhole size={20} /><span>Your choices are hidden. No peeking, promise.</span></div></div>; }
 
-function RevealScreen({ matches, onSelect, disabled, onAnotherRound }: { matches: Match[]; onSelect: (food: FoodOption) => void; disabled: boolean; onAnotherRound: () => void }) { const grouped = ['Perfect match', 'Possible match', 'Backup match'] as const; return <div className="reveal-screen"><div className="reveal-header"><div className="eyebrow"><Sparkles size={16} /> The reveal</div><span className="match-count">{matches.length} {matches.length === 1 ? 'match' : 'matches'}</span></div><h1>Look at you two.<br /><em>On the same page.</em></h1><p className="screen-intro">Here’s what survived both appetites. No scores, no blame — just good options.</p>{matches.length ? <div className="matches-list">{grouped.map((tier) => { const tierMatches = matches.filter((match) => match.tier === tier); if (!tierMatches.length) return null; return <div className="match-group" key={tier}><div className="tier-heading"><span className={`tier-dot ${tier === 'Perfect match' ? 'perfect' : tier === 'Possible match' ? 'possible' : 'backup'}`} />{tier}<span>{tierMatches.length}</span></div>{tierMatches.map((match) => <button className={`match-card ${tier === 'Perfect match' ? 'match-perfect' : tier === 'Possible match' ? 'match-possible' : 'match-backup'}`} key={match.id} onClick={() => onSelect(match)} disabled={disabled}>{foodImages[match.id] ? <span className="match-photo" style={{ backgroundImage: `url(${foodImages[match.id]})` }} /> : <span className="match-emoji">{match.emoji}</span>}<span><strong>{match.emoji} {match.name}</strong><small>{match.description}</small></span><ChevronRight size={20} /></button>)}</div>})}</div> : <div className="empty-match"><div className="empty-icon">🍽️</div><h2>No shared cravings this round</h2><p>That happens. Fresh round, fresh chance to find your FoodMood.</p></div>}<div className="reveal-actions">{matches.length > 0 ? <p><Heart size={15} fill="currentColor" /> Choose a match to make it tonight’s FoodMood</p> : <button className="secondary-button full" onClick={onAnotherRound} disabled={disabled}><RotateCcw size={18} /> Start another round</button>}</div></div>; }
+function ProposalCard({ view, partnerName, food, onAccept, onReject, disabled }: { view: ProposalView; partnerName: string; food: FoodOption; onAccept: () => void; onReject: () => void; disabled: boolean }) {
+  if (view.mode === 'mine') {
+    return <section className="proposal-card proposal-mine">
+      <span className="proposal-pill">{food.emoji} {food.name} proposed</span>
+      <div className="proposal-food"><span className="proposal-emoji">{food.emoji}</span><div><strong>{food.name}</strong><small>{food.description}</small></div></div>
+      <p className="proposal-question">Waiting for {partnerName} to confirm your pick…</p>
+      <div className="proposal-waiting"><span className="proposal-spinner" /> Both of you decide together</div>
+    </section>;
+  }
+
+  return <section className="proposal-card proposal-theirs">
+    <span className="proposal-pill proposal-pill-theirs">{partnerName} picked</span>
+    <div className="proposal-food"><span className="proposal-emoji">{food.emoji}</span><div><strong>{food.name}</strong><small>{food.description}</small></div></div>
+    <p className="proposal-question">Want to make this tonight&apos;s FoodMood?</p>
+    <div className="proposal-actions">
+      <button className="primary-button" onClick={onAccept} disabled={disabled}><Check size={18} /> Accept</button>
+      <button className="secondary-button" onClick={onReject} disabled={disabled}><RotateCcw size={18} /> Reject &amp; start another round</button>
+    </div>
+  </section>;
+}
+
+function RevealScreen({ matches, proposal, partnerName, onPropose, onAccept, onReject, disabled, onAnotherRound }: { matches: Match[]; proposal: ProposalView; partnerName: string; onPropose: (food: FoodOption) => void; onAccept: () => void; onReject: () => void; disabled: boolean; onAnotherRound: () => void }) { const grouped = ['Perfect match', 'Possible match', 'Backup match'] as const; const proposedFood = proposal.mode === 'none' ? null : resolveFoodOption(proposal.foodOptionId); return <div className="reveal-screen"><div className="reveal-header"><div className="eyebrow"><Sparkles size={16} /> The reveal</div><span className="match-count">{matches.length} {matches.length === 1 ? 'match' : 'matches'}</span></div><h1>Look at you two.<br /><em>On the same page.</em></h1><p className="screen-intro">Here’s what survived both appetites. No scores, no blame — just good options.</p>{proposedFood ? <ProposalCard view={proposal} partnerName={partnerName} food={proposedFood} onAccept={onAccept} onReject={onReject} disabled={disabled} /> : matches.length ? <div className="matches-list">{grouped.map((tier) => { const tierMatches = matches.filter((match) => match.tier === tier); if (!tierMatches.length) return null; return <div className="match-group" key={tier}><div className="tier-heading"><span className={`tier-dot ${tier === 'Perfect match' ? 'perfect' : tier === 'Possible match' ? 'possible' : 'backup'}`} />{tier}<span>{tierMatches.length}</span></div>{tierMatches.map((match) => <button className={`match-card ${tier === 'Perfect match' ? 'match-perfect' : tier === 'Possible match' ? 'match-possible' : 'match-backup'}`} key={match.id} onClick={() => onPropose(match)} disabled={disabled}>{foodImages[match.id] ? <span className="match-photo" style={{ backgroundImage: `url(${foodImages[match.id]})` }} /> : <span className="match-emoji">{match.emoji}</span>}<span><strong>{match.emoji} {match.name}</strong><small>{match.description}</small></span><ChevronRight size={20} /></button>)}</div>})}</div> : <div className="empty-match"><div className="empty-icon">🍽️</div><h2>No shared cravings this round</h2><p>That happens. Fresh round, fresh chance to find your FoodMood.</p></div>}<div className="reveal-actions">{matches.length > 0 && !proposedFood ? <p><Heart size={15} fill="currentColor" /> Propose a match for {partnerName} to confirm</p> : !proposedFood ? <button className="secondary-button full" onClick={onAnotherRound} disabled={disabled}><RotateCcw size={18} /> Start another round</button> : null}</div></div>; }
 
 function ChosenScreen({ food, round, onAnotherRound, disabled }: { food: FoodOption; round: number; onAnotherRound: () => void; disabled: boolean }) { return <div className="chosen-screen"><div className="success-burst"><Check size={38} strokeWidth={3} /></div><div className="eyebrow"><Sparkles size={16} /> Tonight’s FoodMood</div><h1>{food.name}<em>!</em></h1><p className="chosen-subtitle">You’re both craving it.</p><div className="chosen-hero" style={foodImages[food.id] ? { backgroundImage: `linear-gradient(180deg, rgba(17,28,45,.05), rgba(17,28,45,.35)), url(${foodImages[food.id]})` } : undefined}><span className="chosen-match-badge"><Flame size={15} /> Perfect match</span><span className="chosen-emoji">{food.emoji}</span><span className="chosen-hero-label"><Heart size={17} /> Unanimous craving</span></div><div className="decision-summary"><div><span className="summary-icon"><Sparkles size={17} /></span><div><small>Decision summary</small><strong>Indecision defeated</strong></div></div><span className="saved-pill"><CheckCircle2 size={15} /> Both agreed</span><div className="summary-stats"><span><small>Decided by</small><strong>Two people</strong></span><span><small>Round</small><strong>{round} complete</strong></span></div></div><button className="primary-button full" onClick={onAnotherRound} disabled={disabled}><RotateCcw size={18} /> Start another round</button><button className="text-button">Done with dinner decisions</button></div>; }
 function FooterHint() { return <footer className="footer-hint"><Clock3 size={15} /> A tiny decision now, a much better dinner later.</footer>; }

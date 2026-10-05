@@ -28,6 +28,10 @@ export type FoodMoodState = {
   roundId: string;
   roundNumber: number;
   finalFoodOptionId: string | null;
+  /** Pending proposal: the match the proposer picked, awaiting confirmation. */
+  proposedFoodOptionId: string | null;
+  /** Participant who made the pending proposal. */
+  proposedByParticipantId: string | null;
 };
 
 export type FoodMoodMatch = {
@@ -91,12 +95,28 @@ function getErrorMessage(
     return 'This FoodMood is no longer active for you. Please join again with the code.';
   }
 
-  if (message.includes('code') || message.includes('session')) {
-    return 'That FoodMood code is invalid or no longer active.';
+  if (message.includes('own proposal')) {
+    return 'You cannot respond to your own proposal.';
   }
 
-  if (message.includes('shared matches')) {
-    return 'Tonight’s FoodMood has to be one of the shared matches.';
+  if (message.includes('no proposal')) {
+    return 'There is no proposal waiting anymore.';
+  }
+
+  if (message.includes('already pending')) {
+    return 'A proposal is already waiting for your partner.';
+  }
+
+  if (message.includes('moved on')) {
+    return 'That round has already moved on. You are up to date.';
+  }
+
+  if (message.includes('shared match')) {
+    return 'Only a shared match can be proposed.';
+  }
+
+  if (message.includes('code') || message.includes('session')) {
+    return 'That FoodMood code is invalid or no longer active.';
   }
 
   if (message.includes('final') || message.includes('selected')) {
@@ -218,6 +238,20 @@ export function normalizeState(data: unknown): FoodMoodState {
         round.final_food_option_id,
         round.finalFoodOptionId,
         session.final_food_option_id
+      ) || null,
+
+    proposedFoodOptionId:
+      stringValue(
+        root.proposed_food_option_id,
+        root.proposedFoodOptionId,
+        round.proposed_food_option_id
+      ) || null,
+
+    proposedByParticipantId:
+      stringValue(
+        root.proposed_by_participant_id,
+        root.proposedByParticipantId,
+        round.proposed_by_participant_id
       ) || null,
   };
 }
@@ -376,12 +410,17 @@ export async function getFoodMoodMatches(
     .filter((match) => match.foodOptionId);
 }
 
-export async function selectFinalFoodMood(
+/**
+ * Proposes a shared match as the final FoodMood. This does NOT finalize it —
+ * the partner must accept. The RPC is first-write-wins, so if both people
+ * propose at the same moment only the first proposal sticks.
+ */
+export async function proposeFoodMood(
   roundId: string,
   foodOptionId: string
 ): Promise<void> {
   const { data, error } = await supabase.rpc(
-    'select_final_foodmood',
+    'propose_final_foodmood',
     {
       p_round_id: roundId,
       p_food_option_id: foodOptionId,
@@ -391,7 +430,45 @@ export async function selectFinalFoodMood(
   assertRpc(
     data,
     error,
-    'Your partner may have already chosen the final FoodMood.'
+    'We could not propose that FoodMood. Please try again.'
+  );
+}
+
+/**
+ * Confirms the partner's proposal, finalizing the FoodMood. The RPC rejects a
+ * participant confirming their own proposal.
+ */
+export async function acceptFoodMoodProposal(roundId: string): Promise<void> {
+  const { data, error } = await supabase.rpc(
+    'accept_foodmood_proposal',
+    {
+      p_round_id: roundId,
+    }
+  );
+
+  assertRpc(
+    data,
+    error,
+    'We could not confirm the FoodMood. Please try again.'
+  );
+}
+
+/**
+ * Turns down the partner's proposal and rolls straight into the next round for
+ * the same session, so neither browser needs a refresh.
+ */
+export async function rejectFoodMoodProposal(roundId: string): Promise<void> {
+  const { data, error } = await supabase.rpc(
+    'reject_foodmood_proposal',
+    {
+      p_round_id: roundId,
+    }
+  );
+
+  assertRpc(
+    data,
+    error,
+    'We could not reject that pick. Please try again.'
   );
 }
 

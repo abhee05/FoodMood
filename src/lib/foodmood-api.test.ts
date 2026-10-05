@@ -10,14 +10,20 @@ vi.mock('@/lib/supabase', () => ({
 }));
 
 import {
+  acceptFoodMoodProposal,
   createFoodMoodSession,
   getFoodMoodMatches,
   getFoodMoodSessionState,
   joinFoodMoodSession,
   normalizeState,
+  proposeFoodMood,
+  rejectFoodMoodProposal,
   startAnotherFoodMoodRound,
   submitFoodMoodReactions,
 } from '@/lib/foodmood-api';
+import {
+  resolveFlowOutcome, resolveProposalView,
+} from '@/lib/session-flow';
 
 /**
  * Row shapes below are copied verbatim from the live Postgres definitions
@@ -265,5 +271,229 @@ describe('submitFoodMoodReactions', () => {
     await expect(submitFoodMoodReactions(ROUND_ID, { pizza: 'craving' })).rejects.toThrow(
       /could not save your choices/i
     );
+  });
+});
+
+/**
+ * Proposal flow fixtures. The `proposed_*` columns and the three RPCs come from
+ * migration 20261005000000_add_foodmood_proposal.sql.
+ */
+const ME = 'bd6a2de5-d19d-4af5-be53-43753a6976e8';
+const PARTNER = '9b46cebc-b4a3-49d4-a023-9c0b074ae6b2';
+
+describe('normalizeState — proposal columns', () => {
+  it('surfaces a pending proposal and its proposer', () => {
+    const state = normalizeState([
+      stateRow({
+        proposed_food_option_id: 'pizza',
+        proposed_by_participant_id: PARTNER,
+        proposed_at: '2026-10-05 09:00:00+00',
+      }),
+    ]);
+
+    expect(state.proposedFoodOptionId).toBe('pizza');
+    expect(state.proposedByParticipantId).toBe(PARTNER);
+  });
+
+  it('defaults to no proposal', () => {
+    const state = normalizeState([stateRow()]);
+    expect(state.proposedFoodOptionId).toBeNull();
+    expect(state.proposedByParticipantId).toBeNull();
+  });
+
+  it('does not invent a proposal when the round is fresh', () => {
+    const state = normalizeState([stateRow({ round_number: 2 })]);
+    expect(state.proposedFoodOptionId).toBeNull();
+  });
+});
+
+describe('proposeFoodMood', () => {
+  it('proposes without finalizing', async () => {
+    rpc.mockResolvedValue({ data: null, error: null });
+
+    await proposeFoodMood(ROUND_ID, 'pizza');
+
+    expect(rpc).toHaveBeenCalledWith('propose_final_foodmood', {
+      p_round_id: ROUND_ID,
+      p_food_option_id: 'pizza',
+    });
+  });
+
+  it('rejects a food that is not a shared match', async () => {
+    rpc.mockResolvedValue({
+      data: null,
+      error: { message: 'Only a shared match can be proposed' },
+    });
+
+    await expect(proposeFoodMood(ROUND_ID, 'pizza')).rejects.toThrow(
+      /only a shared match can be proposed/i
+    );
+  });
+
+  it('reports a conflicting simultaneous proposal', async () => {
+    rpc.mockResolvedValue({
+      data: null,
+      error: {
+        message: 'A proposal is already pending or this round is already decided',
+      },
+    });
+
+    await expect(proposeFoodMood(ROUND_ID, 'pizza')).rejects.toThrow(
+      /already waiting for your partner/i
+    );
+  });
+
+  it('refuses a stale proposal from a finished round', async () => {
+    rpc.mockResolvedValue({
+      data: null,
+      error: { message: 'This round has already moved on' },
+    });
+
+    await expect(proposeFoodMood(ROUND_ID, 'pizza')).rejects.toThrow(
+      /already moved on/i
+    );
+  });
+});
+
+describe('acceptFoodMoodProposal', () => {
+  it('accepts the partner proposal with only the round id', async () => {
+    rpc.mockResolvedValue({ data: null, error: null });
+
+    await acceptFoodMoodProposal(ROUND_ID);
+
+    expect(rpc).toHaveBeenCalledWith('accept_foodmood_proposal', {
+      p_round_id: ROUND_ID,
+    });
+  });
+
+  it('blocks accepting your own proposal', async () => {
+    rpc.mockResolvedValue({
+      data: null,
+      error: { message: 'You cannot accept your own proposal' },
+    });
+
+    await expect(acceptFoodMoodProposal(ROUND_ID)).rejects.toThrow(
+      /cannot respond to your own proposal/i
+    );
+  });
+
+  it('blocks accepting when there is nothing pending', async () => {
+    rpc.mockResolvedValue({
+      data: null,
+      error: { message: 'There is no proposal to accept' },
+    });
+
+    await expect(acceptFoodMoodProposal(ROUND_ID)).rejects.toThrow(
+      /no proposal waiting anymore/i
+    );
+  });
+
+  it('keeps an accepted FoodMood immutable', async () => {
+    rpc.mockResolvedValue({
+      data: null,
+      error: { message: 'A final FoodMood has already been selected' },
+    });
+
+    await expect(acceptFoodMoodProposal(ROUND_ID)).rejects.toThrow(
+      /already chose the final/i
+    );
+  });
+});
+
+describe('rejectFoodMoodProposal', () => {
+  it('rejects with only the round id', async () => {
+    rpc.mockResolvedValue({ data: null, error: null });
+
+    await rejectFoodMoodProposal(ROUND_ID);
+
+    expect(rpc).toHaveBeenCalledWith('reject_foodmood_proposal', {
+      p_round_id: ROUND_ID,
+    });
+  });
+
+  it('blocks rejecting your own proposal', async () => {
+    rpc.mockResolvedValue({
+      data: null,
+      error: { message: 'You cannot reject your own proposal' },
+    });
+
+    await expect(rejectFoodMoodProposal(ROUND_ID)).rejects.toThrow(
+      /cannot respond to your own proposal/i
+    );
+  });
+
+  it('refuses a stale reject from a previous round', async () => {
+    rpc.mockResolvedValue({
+      data: null,
+      error: { message: 'This round has already moved on' },
+    });
+
+    await expect(rejectFoodMoodProposal(ROUND_ID)).rejects.toThrow(
+      /already moved on/i
+    );
+  });
+});
+
+describe('proposal round trip across two participants', () => {
+  it('ends with both participants on the final FoodMood', async () => {
+    // Proposer proposes; partner's poll sees the proposal...
+    let server = stateRow({
+      proposed_food_option_id: 'pizza',
+      proposed_by_participant_id: ME,
+    });
+
+    rpc.mockImplementation(async (name: string) => {
+      if (name === 'get_foodmood_session_state') return { data: [server], error: null };
+      if (name === 'accept_foodmood_proposal') {
+        // Server clears the proposal and finalizes.
+        server = stateRow({ final_food_option_id: 'pizza', final_selected_at: '2026-10-05 09:01:00+00' });
+        return { data: null, error: null };
+      }
+      return { data: null, error: null };
+    });
+
+    const proposed = normalizeState([server]);
+    expect(proposed.proposedFoodOptionId).toBe('pizza');
+    expect(proposed.finalFoodOptionId).toBeNull();
+
+    await acceptFoodMoodProposal(ROUND_ID);
+    const afterAccept = normalizeState([server]);
+
+    expect(afterAccept.finalFoodOptionId).toBe('pizza');
+    // The proposal is consumed, so neither side can respond to it again.
+    expect(afterAccept.proposedFoodOptionId).toBeNull();
+    expect(resolveProposalView(afterAccept)).toEqual({ mode: 'none' });
+  });
+
+  it('ends with both participants in the next round after a reject', async () => {
+    let server = stateRow({
+      proposed_food_option_id: 'pizza',
+      proposed_by_participant_id: PARTNER,
+    });
+
+    rpc.mockImplementation(async (name: string) => {
+      if (name === 'reject_foodmood_proposal') {
+        server = stateRow({
+          round_id: '6e82b4f0-ce0c-4a72-ba6a-497d40911075',
+          round_number: 2,
+        });
+        return { data: null, error: null };
+      }
+      if (name === 'get_foodmood_session_state') return { data: [server], error: null };
+      return { data: null, error: null };
+    });
+
+    const before = normalizeState([server]);
+    expect(before.finalFoodOptionId).toBeNull();
+
+    await rejectFoodMoodProposal(ROUND_ID);
+    const afterReject = normalizeState([server]);
+
+    expect(afterReject.finalFoodOptionId).toBeNull();
+    expect(afterReject.roundNumber).toBe(2);
+    expect(afterReject.proposedFoodOptionId).toBeNull();
+    // The partner's screen advances without a refresh.
+    expect(resolveFlowOutcome(before.roundNumber, afterReject, 'reveal')).toBe('newRound');
+    expect(resolveProposalView(afterReject)).toEqual({ mode: 'none' });
   });
 });
