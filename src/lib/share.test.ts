@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { buildJoinUrl, copyJoinCode, copyTextToClipboard } from '@/lib/share';
+import {
+  buildJoinUrl, copyJoinCode, copyTextToClipboard, readJoinCodeFromSearch,
+} from '@/lib/share';
 
 /**
  * `Navigator.clipboard` is not present in every runtime, so the stub is modelled
@@ -103,3 +105,72 @@ describe('copyTextToClipboard', () => {
   });
 });
 
+
+describe('readJoinCodeFromSearch — an invite link prefills the code', () => {
+  it('reads the session code out of ?join=', () => {
+    expect(readJoinCodeFromSearch('?join=MOOD-7K2P')).toBe('MOOD-7K2P');
+  });
+
+  it('uppercases a lowercased invite code', () => {
+    expect(readJoinCodeFromSearch('?join=mood-7k2p')).toBe('MOOD-7K2P');
+  });
+
+  it('trims whitespace around the code', () => {
+    expect(readJoinCodeFromSearch('?join=%20MOOD-7K2P%20')).toBe('MOOD-7K2P');
+  });
+
+  it('works alongside other query parameters', () => {
+    expect(readJoinCodeFromSearch('?utm=x&join=MOOD-7K2P&ref=a')).toBe('MOOD-7K2P');
+  });
+
+  it('returns empty when there is no join parameter', () => {
+    expect(readJoinCodeFromSearch('')).toBe('');
+    expect(readJoinCodeFromSearch('?foo=1')).toBe('');
+  });
+
+  it('treats an empty join parameter as no code', () => {
+    expect(readJoinCodeFromSearch('?join=')).toBe('');
+  });
+
+  // The full loop: what Copy invite link puts on the clipboard must come back
+  // as a prefilled code, so an invited person only types their name.
+  it('round-trips the URL produced by buildJoinUrl', () => {
+    const url = buildJoinUrl('MOOD-7K2P', 'https://foodmood.app', '/');
+
+    expect(url).toBe('https://foodmood.app/?join=MOOD-7K2P');
+    expect(readJoinCodeFromSearch(url.slice(url.indexOf('?')))).toBe('MOOD-7K2P');
+  });
+
+  it('round-trips a code that needs URL encoding', () => {
+    const url = buildJoinUrl('MOOD A/B', 'https://foodmood.app', '/');
+
+    expect(url).toBe('https://foodmood.app/?join=MOOD%20A%2FB');
+    expect(readJoinCodeFromSearch('?join=MOOD%20A%2FB')).toBe('MOOD A/B');
+  });
+
+  it('round-trips on a nested pathname deploy', () => {
+    const url = buildJoinUrl('MOOD-7K2P', 'https://x.vercel.app', '/app/');
+    expect(readJoinCodeFromSearch('?join=MOOD-7K2P')).toBe('MOOD-7K2P');
+    expect(url).toBe('https://x.vercel.app/app/?join=MOOD-7K2P');
+  });
+});
+
+describe('the invite link and the session code are copied separately', () => {
+  it('copies the full URL for the invite link, and only the code for the code', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    stubNavigator({ writeText });
+    const lastCopied = () => writeText.mock.calls[writeText.mock.calls.length - 1][0] as string;
+
+    const url = buildJoinUrl('MOOD-7K2P', 'https://foodmood.app', '/');
+
+    // Copy invite link
+    expect(await copyTextToClipboard(url)).toBe(true);
+    expect(writeText).toHaveBeenLastCalledWith(url);
+    expect(lastCopied()).toContain('?join=MOOD-7K2P');
+
+    // Copy code (icon beside the big code, and the Join Code field)
+    expect(await copyJoinCode('MOOD-7K2P')).toBe(true);
+    expect(writeText).toHaveBeenLastCalledWith('MOOD-7K2P');
+    expect(lastCopied()).not.toContain('?join=');
+  });
+});

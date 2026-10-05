@@ -16,6 +16,17 @@ export function buildJoinUrl(code: string, origin?: string, pathname?: string): 
 }
 
 /**
+ * Reads `?join=<code>` out of a query string so an invited person lands with the
+ * session code already filled in and only has to type their name.
+ *
+ * Uppercases to match the join field, which normalizes on input.
+ */
+export function readJoinCodeFromSearch(search: string): string {
+  const raw = new URLSearchParams(search).get('join');
+  return raw ? raw.trim().toUpperCase() : '';
+}
+
+/**
  * Copies text, preferring the async Clipboard API and falling back to a
  * hidden textarea + execCommand for insecure contexts and older webviews
  * where `navigator.clipboard` is missing or rejects.
